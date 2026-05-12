@@ -1,0 +1,1581 @@
+# Setup - Install and Load Libraries 
+
+The libraries used in this project support the full data wrangling pipeline, from loading and cleaning the raw Census files to preparing the dataset for analysis. `tidyverse` serves as the backbone of the workflow, providing `readr` for fast and controlled CSV loading, `dplyr` for column selection, renaming, and derived variable calculations, and `stringr` for string manipulation tasks such as parsing and cleaning geographic labels. `lubridate` is loaded to support any date-related operations that may arise during analysis. `data.table` is used for efficient data handling during the type conversion process, and `mice` supports the median imputation strategy applied to columns with missing values after special Census values were replaced with `NA`.  
+
+```{r eval= FALSE}
+# Installing libraries
+install.packages("tidyverse")
+install.packages("stringr")
+install.packages("lubridate")
+install.packages("data.table")
+install.packages("mice")
+install.packages("ggplot2")
+install.packages("scales")
+```
+
+```{r}
+#Loading libraries
+library(tidyverse)
+library(stringr)
+library(lubridate)
+library(data.table)
+library(mice)
+library(gridExtra)
+library(ggplot2)
+library(scales)
+```
+
+
+# Loading datasets
+
+These paths were used from local folders. Please make sure you download the datasets from the provided URLs in the documentation file. Once downloaded, please ensure the paths are modified to those of the folder that you saved the datatsets into. 
+We are reading the csv as character type in all the variables; this is done to avoid R from silently mishandling suppression values like "N" or "(X)" that we have previously identified in the Census Bureau's official data dictionary and table notes. These values will be handled in another section of this notebook so we want to keep them available. 
+
+Because of the COVID-19 pandemic, the Census bureau did not conduct any surveys for the year 2020. For this reason, this year is not included in the analysis.
+
+```{r}
+# We are reading every file as character so R doesn't do their own interpretations before we start the cleaning process. -J
+
+df_2019 <- read_csv('/Users/jonatantobon/Documents/Morgan/INSS615-Data Wrangling/Group Project/2019/ACSDP1Y2019.DP05-Data.csv', col_types = cols(.default = "c"), show_col_types = FALSE)
+df_2021 <- read_csv('/Users/jonatantobon/Documents/Morgan/INSS615-Data Wrangling/Group Project/2021/ACSDP1Y2021.DP05-Data.csv', col_types = cols(.default = "c"), show_col_types = FALSE)
+df_2022 <- read_csv('/Users/jonatantobon/Documents/Morgan/INSS615-Data Wrangling/Group Project/2022/ACSDP1Y2022.DP05-Data.csv', col_types = cols(.default = "c"), show_col_types = FALSE)
+df_2023 <- read_csv('/Users/jonatantobon/Documents/Morgan/INSS615-Data Wrangling/Group Project/2023/ACSDP1Y2023.DP05-Data.csv', col_types = cols(.default = "c"), show_col_types = FALSE)
+df_2024 <- read_csv('/Users/jonatantobon/Documents/Morgan/INSS615-Data Wrangling/Group Project/2024/ACSDP1Y2024.DP05-Data.csv', col_types = cols(.default = "c"), show_col_types = FALSE)
+```
+Before making any changes to the datasets, we decided to create a copy of the data we have in `df_YYYY` to make sure the data is not affected by any of the changes we implement through the wrangling process.
+
+```{r}
+# Creating a copy of the original dataset to preserve the data -J
+new_df_2019 <- df_2019
+new_df_2021 <- df_2021
+new_df_2022 <- df_2022
+new_df_2023 <- df_2023
+new_df_2024 <- df_2024
+```
+
+# Dropping the label row
+
+The Census Bureau includes a second row in every DP05 export containing verbose label descriptions for each column, such as "Estimate!!SEX AND AGE!!Total population". Since the column codes in the header row are sufficient for our purpose and this label row would otherwise be read as a data observation, we remove it using `slice(-1)` before proceeding with any transformations. 
+
+
+```{r}
+# Removing label row -J
+new_df_2019 <- new_df_2019 %>% slice(-1)
+new_df_2021 <- new_df_2021 %>% slice(-1)
+new_df_2022 <- new_df_2022 %>% slice(-1)
+new_df_2023 <- new_df_2023 %>% slice(-1)
+new_df_2024 <- new_df_2024 %>% slice(-1)
+```
+
+# Adding survey_year as the first column
+
+Since the five survey years will eventually be combined into a single longitudinal dataset, each row needs to carry a record of which year it belongs to. We use `mutate()` to add a `survey_year` column with the corresponding year value for each dataset, and `relocate()` to position it as the first column before `GEO_ID`. This ensures that once all years are bound together, the survey year is immediately identifiable for every observation. 
+
+```{r}
+# Adding survey year -J
+new_df_2019 <- new_df_2019 %>% mutate(survey_year = 2019) %>% relocate(survey_year, .before = GEO_ID)
+new_df_2021 <- new_df_2021 %>% mutate(survey_year = 2021) %>% relocate(survey_year, .before = GEO_ID)
+new_df_2022 <- new_df_2022 %>% mutate(survey_year = 2022) %>% relocate(survey_year, .before = GEO_ID)
+new_df_2023 <- new_df_2023 %>% mutate(survey_year = 2023) %>% relocate(survey_year, .before = GEO_ID)
+new_df_2024 <- new_df_2024 %>% mutate(survey_year = 2024) %>% relocate(survey_year, .before = GEO_ID)
+```
+
+# Analyzing coding and name conventions
+
+Before combining all five datasets into a single longitudinal file, we mapped the 21 variables selected for this study to their corresponding Census Bureau `DP05` column codes. During this process we identified discrepancies in coding conventions across survey years, where certain variable codes shifted between 2019 and later years as a result of updates to the Census Bureau's race and ethnicity question following the 2020 Census. In those cases, we identified the correct code for each year and documented the shift inline as a comment for transparency. A full reference of the code mapping by year is available in the project documentation. Using `select()` allowed us to drop all columns outside our 21-variable scope, and renaming was applied directly within the same `select()` call to keep the transformation concise and readable.
+
+**Note**: Variable sex ratio is measured as number of males per 100 females.
+
+```{r}
+# Selecting and renaming the columns we are going to work with. Because the codes are shifting across year, we need to do this separately. -J
+
+# Selecting and renaming for 2019
+
+new_df_2019 <- new_df_2019 %>%
+  select(
+    survey_year,
+    geo_id = GEO_ID,
+    name = NAME,
+    total_population = DP05_0001E,
+    total_male_population = DP05_0002E,
+    total_female_population = DP05_0003E,
+    sex_ratio = DP05_0004E,
+    population_under_5 = DP05_0005E,
+    population_under_18 = DP05_0019E,
+    population_16_and_over = DP05_0020E,
+    population_18_and_over = DP05_0021E,
+    population_65_and_over = DP05_0024E,
+    median_age = DP05_0018E,
+    white_alone = DP05_0037E,
+    black_alone = DP05_0038E,
+    american_indian_alaska_native_alone = DP05_0039E,
+    asian_alone = DP05_0044E,
+    native_hawaiian_pacific_islander_alone = DP05_0052E,
+    two_or_more_races = DP05_0035E,
+    hispanic_latino = DP05_0071E,
+    not_hispanic_latino_white_alone = DP05_0077E,
+    not_hispanic_latino_black_alone = DP05_0078E,
+    total_housing_units = DP05_0086E,
+  )
+
+#Selecting and renaming for 2021
+
+new_df_2021 <- new_df_2021 %>%
+  select(
+    survey_year,
+    geo_id = GEO_ID,
+    name = NAME,
+    total_population = DP05_0001E,
+    total_male_population = DP05_0002E,
+    total_female_population = DP05_0003E,
+    sex_ratio = DP05_0004E,
+    population_under_5 = DP05_0005E,
+    population_under_18 = DP05_0019E,
+    population_16_and_over = DP05_0020E,
+    population_18_and_over = DP05_0021E,
+    population_65_and_over = DP05_0024E,
+    median_age = DP05_0018E,
+    white_alone = DP05_0037E,
+    black_alone = DP05_0038E,
+    american_indian_alaska_native_alone = DP05_0039E,
+    asian_alone = DP05_0044E,
+    native_hawaiian_pacific_islander_alone = DP05_0052E,
+    two_or_more_races = DP05_0035E,
+    hispanic_latino = DP05_0071E,
+    not_hispanic_latino_white_alone = DP05_0077E,
+    not_hispanic_latino_black_alone = DP05_0078E,
+    total_housing_units = DP05_0086E,
+  )
+
+# Selecting and renaming for 2022
+
+new_df_2022 <- new_df_2022 %>%
+  select(
+    survey_year,
+    geo_id = GEO_ID,
+    name = NAME,
+    total_population = DP05_0001E,
+    total_male_population = DP05_0002E,
+    total_female_population = DP05_0003E,
+    sex_ratio = DP05_0004E,
+    population_under_5 = DP05_0005E,
+    population_under_18 = DP05_0019E,
+    population_16_and_over = DP05_0020E,
+    population_18_and_over = DP05_0021E,
+    population_65_and_over = DP05_0024E,
+    median_age = DP05_0018E,
+    white_alone = DP05_0037E,
+    black_alone = DP05_0038E,
+    american_indian_alaska_native_alone = DP05_0039E,
+    asian_alone = DP05_0044E,
+    native_hawaiian_pacific_islander_alone = DP05_0052E,
+    two_or_more_races = DP05_0035E,
+    hispanic_latino = DP05_0073E, #Shifted from `DP05_0071E`
+    not_hispanic_latino_white_alone = DP05_0079E, # Shifted from `DP05_0077E`
+    not_hispanic_latino_black_alone = DP05_0080E, #Shifted from `DP05_0078E`
+    total_housing_units = DP05_0088E, #Shifted from `DP05_0086E`
+  )
+
+# Selecting and renaming for 2023
+
+new_df_2023 <- new_df_2023 %>%
+  select(
+    survey_year,
+    geo_id = GEO_ID,
+    name = NAME,
+    total_population = DP05_0001E,
+    total_male_population = DP05_0002E,
+    total_female_population = DP05_0003E,
+    sex_ratio = DP05_0004E,
+    population_under_5 = DP05_0005E,
+    population_under_18 = DP05_0019E,
+    population_16_and_over = DP05_0020E,
+    population_18_and_over = DP05_0021E,
+    population_65_and_over = DP05_0024E,
+    median_age = DP05_0018E,
+    white_alone = DP05_0037E,
+    black_alone = DP05_0038E,
+    american_indian_alaska_native_alone = DP05_0039E,
+    asian_alone = DP05_0047E, #Shifted from `DP05_0044E`
+    native_hawaiian_pacific_islander_alone = DP05_0055E, #Shifted from `DP05_0052E`
+    two_or_more_races = DP05_0035E,
+    hispanic_latino = DP05_0076E, #Shifted from `DP05_0071E` and then again from `DP05_0073E`
+    not_hispanic_latino_white_alone = DP05_0082E, # Shifted from `DP05_0077E` and then again from `DP05_0079E`
+    not_hispanic_latino_black_alone = DP05_0083E, #Shifted from `DP05_0078E` and then again from `DP05_0080E`
+    total_housing_units = DP05_0091E, #Shifted from `DP05_0086E` and then again from `DP05_0088E`
+  )
+
+# Selecting and renaming for 2024
+
+new_df_2024 <- new_df_2024 %>%
+  select(
+    survey_year,
+    geo_id = GEO_ID,
+    name = NAME,
+    total_population = DP05_0001E,
+    total_male_population = DP05_0002E,
+    total_female_population = DP05_0003E,
+    sex_ratio = DP05_0004E,
+    population_under_5 = DP05_0005E,
+    population_under_18 = DP05_0019E,
+    population_16_and_over = DP05_0020E,
+    population_18_and_over = DP05_0021E,
+    population_65_and_over = DP05_0024E,
+    median_age = DP05_0018E,
+    white_alone = DP05_0037E,
+    black_alone = DP05_0045E, #Shifted from `DP05_0038E`
+    american_indian_alaska_native_alone = DP05_0053E, #Shifted from `DP05_0039E`
+    asian_alone = DP05_0061E, #Shifted from `DP05_0044E` and then again from `DP05_0047E`
+    native_hawaiian_pacific_islander_alone = DP05_0069E, #Shifted from `DP05_0052E` and then again from `DP05_0055E`
+    two_or_more_races = DP05_0035E,
+    hispanic_latino = DP05_0090E, #Shifted from `DP05_0071E` and then again from `DP05_0073E` and one more time from `DP05_0076E`
+    not_hispanic_latino_white_alone = DP05_0096E, # Shifted from `DP05_0077E` and then again from `DP05_0079E` and more time from `DP05_0082E`
+    not_hispanic_latino_black_alone = DP05_0097E, #Shifted from `DP05_0078E` and then again from `DP05_0080E` and more time from `DP05_0083E`
+    total_housing_units = DP05_0105E, #Shifted from `DP05_0086E` and then again from `DP05_0088E` and more time from `DP05_0091E`
+  )
+```
+
+# Dataset Combination
+
+Since our dataset now only contains the variables we want to work with, the `survey_year`, and the naming of the variables in a readable format, we combined al `new_df_YYYY` into one single longitudinal dataset using `bind_rows` to stack each year under then previous one (e.g., 2019,2021,2022,2023,2024). This combination resulted in a total of 4244 observations and 23 columns. 
+
+```{r}
+# Combining dataset -J&D
+census_clean <- bind_rows(new_df_2019, new_df_2021, new_df_2022, new_df_2023, new_df_2024)
+
+glimpse(census_clean)
+```
+# Handling census special values and type conversion 
+#WARRENS SCRIPT PASTED HERE AND MODIFIED TO PRESERVE FLOWS OF CAPSTONE FILE
+
+After we combined our individual yearly files into a single dataset, we recognized that several columns (demographic and race-related) were still stored as character because Census special values had been maintained during previous cleaning steps. Data entries that were either suppressed by the Census or entered as non-applicable, including empty strings, "NA", "N", "(X)", "-", were stored in field that contained numeric estimates. To get the dataset ready for calculations and visualizations, we excluded (geo_id) and (name), then identified which remaining character columns that needed conversion. We then converted the remaining necessary columns to numeric and validated the new structure to ensure the variables were truly ready for the team to create derived variables and aggregation.
+
+```{r}
+# Loading dataset
+df <- census_clean
+
+# Previewing first rows
+#head(df, 10)
+
+```
+
+```{r}
+# Viewing dimensions
+dim(df)
+```
+
+```{r}
+# Viewing column headers
+colnames(df)
+```
+```{r}
+# Checking data types
+str(df)
+```
+
+```{r}
+# Identifying non-numeric columns
+non_numeric_cols <- c("geo_id", "name")
+
+# Checking character columns
+char_cols <- names(df)[sapply(df, is.character)]
+char_cols
+```
+
+```{r}
+# Reviewing character->numeric columns
+cols_to_convert <- setdiff(char_cols, non_numeric_cols)
+cols_to_convert
+```
+```{r}
+
+# Replacing special values
+df <- df %>%
+  mutate(across(
+    all_of(cols_to_convert),
+    ~ ifelse(. %in% c("N", "(X)", "-", "", "NA"), NA, .)
+  ))
+
+# Converting special values
+df <- df %>%
+  mutate(across(
+    all_of(cols_to_convert),
+    as.numeric
+  ))
+
+# Re-checking data types (post-conversion)
+str(df)
+
+# Writing cleaned dataset (post-conversion)
+#write_csv(df, "Cleaned_Dataset_TypeConversion.csv")
+
+#Overriding Census_Cleaned with proper numeric formatting
+census_clean <- df
+```
+
+
+# Geographic string parsing
+
+The `name` column contains values formatted as "County Name, State Name". To make it easier for analysis, we split this column into two separate variables: `county_name` and `state_name` using the `separate` function. 
+
+```{r results='hide'}
+# Separating the County Name, State Name into two different columns -J
+census_clean <- census_clean %>%
+  separate(name, into = c("county_name", "state_name"), sep = ", ")
+
+head(census_clean, 5)
+```
+We then need to normalize the `county_name` column by removing the `"County"`, `"Parish"`, `"Borough"` or `"Census Area"` so that names are consistent across the dataset. For example `"Baldwin County"` should just be `"Baldwin"`. This was achieved by using `str_remove()`. We gave `county_name` to identify the strings that need to be removed from the observation. Once that worked, we used `str_detect()` to verify that the `county_name` contains only the name of the county.  
+
+```{r results='hide'}
+census_clean <- census_clean %>%
+  mutate(county_name = str_remove(county_name, " County| Parish| Borough| Census Area"))
+
+# And we verify that all of the strings have been removed correctly from the column 
+census_clean %>%
+  filter(str_detect(county_name, "County|Parish|Borough|Census Area")) %>%
+  select(county_name, state_name)
+
+#We get 0 Rows, and graphically we can just call the head() so we can see that the county, parish, borough, or census area has been removed -J
+head(census_clean, 10)
+```
+# Regional Classification 
+
+With the name variable separated into `county_name` and `state_name` the new state name variable can be used to create new `region`, and `division` variable for the purposes of finer geographic groupings
+
+Following the separation the `name` variable into `county_name` and `state_name`, it was now simple to create additional variables of `region` and `division` corresponding to the official census regions and division counties are assigned to.  This would allow for simpler geographical filtering for end users of this dataset.  The first step was to create lists of the four regions that could be used to assign an observations region variable via subsetting.  The same definition of Census divisions as list of the sates they're comprised of was performed.  Puerto Rico does not officially belong to any region or division so it was assigned to the list of territories for the sake of avoiding empty cells with the final dataset.  This list is only defined in regions but used for both region and division.
+
+```{r}
+#Assigning states to lists of the region they belong to
+
+Northeast <- c('Connecticut', 'Maine', 'Massachusetts', 'New Hampshire', 'New Jersey', 'New York', 'Pennsylvania', 'Rhode Island', 'Vermont')
+
+South <- c("Alabama", "Arkansas", "Delaware", "Florida", "Georgia", "Kentucky", "Louisiana", "Maryland", "Mississippi", "North Carolina", "Oklahoma", "South Carolina", "Tennessee", "Texas", "Virginia", "West Virginia", "District of Columbia")
+
+Midwest <- c("Illinois", "Indiana", "Iowa", "Kansas", "Michigan", "Minnesota", "Missouri", "Nebraska", "North Dakota", "Ohio", "South Dakota", "Wisconsin")
+
+West <- c("Alaska", "Arizona", "California", "Colorado", "Hawaii", "Idaho", "Montana", "Nevada", "New Mexico", "Oregon", "Utah", "Washington", "Wyoming")
+
+Territories <- "Puerto Rico"
+
+#Same for Census Divisions
+New_England <- c("Connecticut", "Maine", "Massachusetts", "New Hampshire", "Rhode Island", "Vermont")
+
+Middle_Atlantic <- c("New Jersey", "New York", "Pennsylvania")
+
+East_North_Central <- c("Illinois", "Indiana", "Michigan", "Ohio", "Wisconsin")
+
+West_North_Central <- c("Iowa", "Kansas", "Minnesota", "Missouri", "Nebraska", "North Dakota", "South Dakota")
+
+South_Atlantic <- c("Delaware", "Florida", "Georgia", "Maryland", "North Carolina", "South Carolina", "Virginia", "West Virginia", "District of Columbia")
+
+East_South_Central <- c("Alabama", "Kentucky", "Mississippi", "Tennessee")
+
+West_South_Central <- c("Arkansas", "Louisiana", "Oklahoma", "Texas")
+
+Mountain <- c("Arizona", "Colorado", "Idaho", "Montana", "Nevada", "New Mexico", "Utah", "Wyoming")
+
+Pacific <- c("Alaska", "California", "Hawaii", "Oregon", "Washington")
+```
+
+A new `Region_Divison` dataframe is created so that the `census_clean` data can be worked on safely and a new `region` column is made as a copy of the `state_name` variable.  Every state name in `region` is then overwritten with its region using base R subletting with assignment. for every region the entire `region` column is parsed and if a string is within the list of that region then the string is replaced with a string of that Region. A check at the end returns all unique strings so that it can be made certain that there are only regions inside `region`
+
+```{r}
+#separate dataframe for manipulation
+Region_Division <- census_clean
+
+###Adding region variable
+Region_Division$region <- Region_Division$state_name
+
+#reassignment
+Region_Division$region[Region_Division$state_name %in% Northeast] <- "Northeast"
+Region_Division$region[Region_Division$state_name %in% South] <- "South"
+Region_Division$region[Region_Division$state_name %in% Midwest] <- "Midwest"
+Region_Division$region[Region_Division$state_name %in% West] <- "West"
+
+#special case for Puerto Rico
+Region_Division$region[Region_Division$state_name %in% Territories] <- "Territory"    
+
+#check
+unique(Region_Division$region)   #I'm going to add special case for Puerto Rico since it isn't officially assigned to anything
+
+```
+The same process was applied to create the `division` column and then the `census_clean` dataset was overwritten with the verified results
+
+```{r}
+Region_Division$division <- Region_Division$state_name
+
+#assignment by filter
+Region_Division$division[Region_Division$state_name %in% New_England] <- "New England"
+Region_Division$division[Region_Division$state_name %in% Middle_Atlantic] <- "Middle Atlantic"
+Region_Division$division[Region_Division$state_name %in% East_North_Central] <- "East North Central"
+Region_Division$division[Region_Division$state_name %in% West_North_Central] <- "West North Central"
+Region_Division$division[Region_Division$state_name %in% South_Atlantic] <- "South Atlantic"
+Region_Division$division[Region_Division$state_name %in% East_South_Central] <- "East South Central"
+Region_Division$division[Region_Division$state_name %in% West_South_Central] <- "West South Central"
+Region_Division$division[Region_Division$state_name %in% Mountain] <- "Mountain"
+Region_Division$division[Region_Division$state_name %in% Pacific] <- "Pacific"
+#Puerto Rico case
+Region_Division$division[Region_Division$state_name %in% Territories] <- "Territory"
+
+#check
+unique(Region_Division$division)
+
+#updating census clean
+census_clean <- Region_Division
+```
+# Missing Data Assessment
+
+In order to properly assess missing data all columns in `census_clean` were used to create a list and that list was copied into a data frame `missing_sums`. Originally a simple for loop was used to iterate through he columns of `census_clean` sum all the NA values and store that sum in the appropriate row of missing sums.  Then, it was deemed better practice to use sapply in alignment with class instruction.  when looking at `missing_sums` we can see that the the dataset is mostly complete and the columns have a missingness count of 18 at the most.  This is far less than 5% of a dataset with 4243 rows of data and we ca see that proven further with the `missing_flag` of variables with over 10% missingness dataframe being completely empty.
+
+```{r}
+cols_for_missing <- colnames(census_clean)
+missing_sums <- as.data.frame(cols_for_missing)
+
+#original
+#i <- 1
+#for (x in cols_for_missing) {
+#  missing_sums$na_count[i] <- sum(is.na(census_clean[[x]]))
+#  i <- i + 1
+#}
+
+#Use of sapply for class aligned imputation
+missing_sums$na_count <- sapply(cols_for_missing, function(x) {
+  sum(is.na(census_clean[[x]]))
+})
+
+
+missing_sums
+missing_flag <- missing_sums[missing_sums$na_count > (.1 * (nrow(census_clean))),]    #flagging where NAs > 10 percent of all rows in column
+missing_flag
+```
+
+Because the missingness rate is so low, it was believed we could safely fill each replace each `NA` with the median of values with its year and region without negatively affecting our data. 
+
+In order to align with classroom expectations of best practice the section was written with functions and operators from the `dplyr` library to improve readability and flow.  Stratification is still done by setting `group_vars` but now every variable in the `cols_for_missing` list except for them has it NA values replaced with the median values of the strata by mutating across all of the non-group variables. One of the values of using `dplyr` over the nested loops is that we can mutate with a single `ifelse()` boolean after grouping instead of having to conceptualize every possibility the nested loops might encounter
+```{r}
+#dlpyr logic
+ imputed_data <- census_clean
+
+#check for mismatched values
+"survey_year" %in% names(census_clean)
+"survey_year" %in% cols_for_missing
+cols_for_missing
+"region" %in% names(imputed_data)
+
+
+group_vars <- c("survey_year", "region")
+feature_vars <- setdiff(cols_for_missing, group_vars)
+imputed_data <- imputed_data %>%
+  group_by(across(all_of(group_vars))) %>%
+  mutate(across(all_of(feature_vars),
+                ~ ifelse(is.na(.), median(., na.rm = TRUE), .))) %>%
+  ungroup()
+
+
+#NA removal check
+sum(is.na(imputed_data))
+```
+
+Overwritting `census_clean`
+
+```{r}
+census_clean <- imputed_data
+```
+
+# Calculations/Derieved Variables
+
+## Housing to Population Ratio
+
+To calculate the housing to population ratio, a new column was added to `census_clean` with every observation's housing units divided by its total population.  After, `quantile` was used to set a temporary `beginning` variable and then the top and bottom ten percent of all observations were subset into vectors.  Specifically begining is set to the value of ratio that is higher than 90% of values and then the value above that are set as the `Top_Ten` vector and vice-versa for the bottom ten.
+```{r}
+census_clean$housing_to_pop <- (census_clean$total_housing_units)/(census_clean$total_population)
+
+#top 10
+beginning <- quantile(census_clean$housing_to_pop, .9)
+head(beginning, 10)
+
+Top_Ten <- census_clean$housing_to_pop[census_clean$housing_to_pop > beginning]
+head(Top_Ten, 10)
+  
+#Bottom 10
+beginning <- quantile(census_clean$housing_to_pop, .1)
+head(beginning, 10)
+
+Bot_Ten <- census_clean$housing_to_pop[census_clean$housing_to_pop < beginning]
+head(Bot_Ten, 10)
+```
+
+## Senior Population Share
+
+We created a derived variable in this section for senior_pop_share. The variable identifies the percentage of the total_population which is 65 years+. Once the variable was created, we validated it by reviewing the output to confirm that the calculation ran correctly and that the new field was added to the cleaned dataset for later use.
+
+```{r}
+# Calculate Senior Pop Share = population 65 and over / total population (as a percentage)
+census_clean <- census_clean %>%
+  mutate(senior_pop_share = (population_65_and_over / total_population) * 100)
+```
+
+```{r}
+# Check Senior Pop Share Summary Stats
+summary(census_clean$senior_pop_share)
+```
+
+```{r}
+# Validate Senior Pop Share
+census_clean %>%
+  select(geo_id, county_name, survey_year, total_population, population_65_and_over, senior_pop_share) %>%
+  head()
+```
+
+## Working Age Population Share
+
+We created a derived variable for working_age_pop_share in this section. The variable measures the percentage of the total_population between the ages of 18 to 64. This variable was calculated population_18_and_over - population_65_and_over / total_population. Once the variable was created, we validated the variable by reviewing the output to confirm that the calculation ran correctly and that the new field was added to the cleaned dataset for later use.
+
+```{r}
+# Calculate Working Age Pop Share as a percentage
+census_clean <- census_clean %>%
+  mutate(working_age_pop_share = ((population_18_and_over - population_65_and_over) / total_population) * 100)
+```
+
+```{r}
+# Check Working Age Pop Share Summary Stats
+summary(census_clean$working_age_pop_share)
+```
+
+```{r}
+# Validate Working Age Pop
+census_clean %>%
+  select(geo_id, county_name, survey_year, total_population, population_18_and_over, population_65_and_over, working_age_pop_share) %>%
+  head()
+```
+
+## Youth Age Population Share
+
+In this section, we created a derived variables that measures the percentage of the total population that is under the age of 18. It was calculated using population_under_18 / total_population. Once the variable was created, we validated the variable by reviewing the output to confirm that the calculation ran correctly and that the new field was added to the cleaned dataset for later use. 
+
+```{r}
+# Calculate Youth Age Pop Share as a percentage
+census_clean <- census_clean %>%
+  mutate(youth_pop_share = (population_under_18 / total_population) * 100)
+```
+
+```{r}
+# Check Youth Age Pop Share Summary Stats
+summary(census_clean$youth_pop_share)
+```
+
+```{r}
+# Validate Youth Age Pop 
+census_clean %>%
+  select(geo_id, county_name, survey_year, total_population, population_under_18, youth_pop_share) %>%
+  head()
+```
+
+
+## Population Change Tier
+
+To validate the Population change tier, it was necessary to compute the percentage change in total population between the 2019 and 2024 surveys to create classifications for the results of the population change. To do this, we created a temporary dataframe `survey_filter` using `filter()` by `survey_year` and selecting only the `geo_id`, `survey_year`, and `total_population`. 
+
+However, to be able to identify the changes within each year, we identified that we needed to convert this new frame from long format to wide, so we could exactly see the total population observations by year. Using `pivot_wider`, we added two columns: `pop_2019` and `pop_2024` and calculated the percentage change (`pct_change`) in the population between those years. After using `pivot_wider`, we identified some `NA` values, which were expected because the Census Bureau does not survey every county every year. The ACS 1-year covers only certain population threshold (65,000+) which causes some counties to appear with one year but not the other. We cannot compute a percentage change of these counties if there are missing values, so the way to handle this is to drop the values. 
+
+Using `case_when` we then added the tiers on a new column `pop_change_tier` based on the percentage change: High Growth if `pct_change > 10`, Moderate growth if `pct_change` between 2 and 10, Stable if `pct_change` between -2 and 2, and Decline if `pct_change < -2`.
+
+Finally, we moved `pop_change_tier` to `census_clean` using `left_join()` and matching the results to the `geo_id`.
+
+
+```{r results='hide'}
+# For this calculation, we first need to filter the data from 2019 surveys and 2024 to find the population per survey_year -J
+survey_filter <- census_clean %>%
+  filter(survey_year == 2019 | survey_year == 2024) %>%
+  select(
+    geo_id,
+    survey_year,
+    total_population
+  ) 
+
+# We then want to change to use a pivot so each county has one row with two columns `pop_2019` and `pop_2024` side by side, for this we use pivot_wider()
+
+survey_filter %>%
+  pivot_wider(names_from = survey_year, values_from = total_population)
+
+# After running this command, we see that there are still some NA values, which is expected because census bureau does not survey every county every year. The ACS 1-year covers only certain population threshold (65,000+) which causes some counties to appear with one year but not the other. We can have a percentage change of these counties if there are missing values, so the way to handle this is to drop the values. 
+
+pop_wide <- survey_filter %>% 
+  pivot_wider(names_from = survey_year, values_from = total_population) %>%
+  drop_na()
+
+# To allow for better handling of the columns, we rename them to a variable name such as `pop_2019` and `pop_2024`
+pop_wide <- pop_wide %>%
+  rename(pop_2019 = `2019`, pop_2024 = `2024`)
+
+# Then we add a new column `pct_change` using mutate(). For this, we need to calculate the percentage change ((pop_2024 - pop_2019)/pop_2019) * 100
+
+pop_wide <- mutate(pop_wide, pct_change = ((pop_2024 - pop_2019)/pop_2019) * 100)
+
+#Now we finally add a new column pop_change_tier that will classify the results we got from pct_change. we will use case_when()
+pop_wide <- pop_wide %>%
+  mutate(pop_change_tier = case_when(
+    pct_change > 10 ~ "High Growth",
+    pct_change >= 2 & pct_change <= 10 ~ "Moderate Growth",
+    pct_change >= -2 & pct_change < 2 ~ "Stable",
+    TRUE ~ "Decline"
+  ))
+
+#Now that we have the result for pop_change_tier, we need to join this table with census_clean so we can have a new column showing the pop tier there.  -J
+
+census_clean <- census_clean %>%
+  left_join(pop_wide %>% select(
+    geo_id, 
+    pop_change_tier
+  ), by = "geo_id"
+  )
+
+```
+
+## Diversity Index
+
+For the diversity index, we wanted to calculate first the proportion of each of the racial groups that we have in the dataset. Based on information from the Census Bureau `hispanic_latino` is not considered a race but an ethnicity, so we did not include these three columns associated with `hispanic_latino` or `not_hispanic_latino` since those are subsets of a racial group. Using `mutate()` we created 6 different columns that contain a calculation per racial group
+
+```{r}
+# We will create the columns in census_clean with the calculation for the proportion. -J
+
+census_clean <- census_clean %>%
+  mutate(
+    prop_white = white_alone/total_population,
+    prop_black = black_alone/total_population,
+    prop_am_in_al_na_alone = american_indian_alaska_native_alone/total_population,
+    prop_asian = asian_alone/total_population,
+    prop_na_ha_pa_is_alone = native_hawaiian_pacific_islander_alone/total_population,
+    prop_two_or_more = two_or_more_races/total_population
+  )
+
+```
+
+Once we had the proportion of each of the racial groups, we created the `diversity_index` using the formula 1 minus the sum of each group's squared proportion of the total population, and using `mutate()` to add the new column to `census_clean`.
+
+```{r}
+# Using the formula to create a new column for the diversity index -J
+census_clean <- census_clean %>%
+  mutate(
+    diversity_index = 1-((prop_white)^2+(prop_black)^2+(prop_am_in_al_na_alone)^2+(prop_asian)^2+(prop_na_ha_pa_is_alone)^2+(prop_two_or_more)^2)
+  )
+
+```
+
+And finally, we classified the counties into Low, Moderate and High diversity tiers using quantile-based cutoffs. To find out which quantiles had the dataset, we use the `quantile()` function, which told us that the 33% of the values were 0.3155051 and the 66% were 0.5119515. We then assigned Low when `diversity_index` is below of the 33% threshold, Moderate if it is between 33% and 66%, and High if it is greater than that. 
+
+Using `table()`, we validated the distribution of `diversity_index` and we could see that the results came out roughly balanced, which confirms the quantile-based approach worked as expected: 
+
+High    Low     Moderate 
+1443    1401    1400 
+
+```{r}
+# Validating quantiles -J
+quantile(census_clean$diversity_index, probs = c(0.33, 0.66), na.rm = TRUE)
+
+# With this, now we know which cutoffs we need to use. Below 0.3155051, we assign Low Tiers, between 0.3155051 and 0.5119515, we assign Moderate, and above that, we assign high. 
+census_clean <- census_clean %>%
+  mutate(diversity_tier = case_when(
+    diversity_index <= 0.3155051 ~ "Low",
+    diversity_index > 0.3155051 & diversity_index <= 0.5119515 ~ "Moderate",
+    TRUE ~ "High"
+  ))
+
+#Just wanted to validate if the distributions were looking okay -J
+table(census_clean$diversity_tier)
+```
+```{r}
+#Validating if we got the `diversity_index` right. -J
+census_clean %>%
+  select(geo_id, county_name, survey_year, diversity_index, diversity_tier) %>%
+  head(10)
+```
+
+We see that some of the Diversity Index values are showing as negative values. Because this calculation is 1 minus the sum of the squared proportions, this index should never be negative. This could be a consequence of the imputed values for a particular county that inflates the proportions beyond 1 when summed. We also noticed that in other cases, the proportions are greater than 1. By law, a proportion can only be between 0 and 1, which could also be a consequence of the Median imputation we did before. We want to identify how many rows are affected by this: 
+
+```{r}
+# Filtering where diversity_index in less than 0 to identify which counties are being affected -J
+census_clean %>%
+  filter(diversity_index < 0) %>%
+  select(
+    county_name,
+    state_name,
+    survey_year,
+    total_population,
+    white_alone,
+    diversity_index
+  ) %>%
+  head(10)
+```
+We see that for example, the `white_alone` racial group has 119898.5 as a value but Cullman is a county with roughly 83k of total population, so imputing a value of 119898 exceeds the total population. This means that the imputation strategy introduced bad values for counties where the regional median for a racial group is larger than that country's total population. Let's check how many rows were affected:
+
+```{r}
+# Counting exactly how many rows have been affected -J
+census_clean %>%
+  filter(diversity_index < 0) %>%
+  count()
+
+census_clean %>%
+  filter(diversity_index < 0) %>%
+  distinct(county_name, state_name, survey_year) %>%
+  nrow()
+```
+We see that 72 rows are affected by the imputation. In this case, we believe that the cleanest option is to set these 72 rows to `NA` values. We cannot impute racial values that exceed the total population for a county, we cannot trust the diversity calculation for those records, so we will revert those values to `NA` and isolate them later to show which counties were not included in survey years or find other proper use of the `NA` values.
+
+```{r}
+# Applying na characters to the 72 rows that were affected by the imputation -J
+census_clean <- census_clean %>%
+  mutate(
+    diversity_index = if_else(diversity_index < 0, NA_real_, diversity_index),
+    diversity_tier = if_else(
+      is.na(diversity_index),
+      NA_character_,
+      diversity_tier
+    )
+  )
+
+census_clean %>%
+  filter(diversity_index < 0) %>%
+  count()
+
+table(census_clean$diversity_tier, useNA = "always")
+```
+We have corrected the `diversity_index` when below zero, however, we still have proportions showing more than 1 in `prop_white` for example. We need to validate which other racial groups are showing a proportion greater than 1:
+
+```{r}
+#Identifying the proportions that are showing greater than 1 -J
+census_clean %>%
+  filter(
+    prop_white > 1 |
+      prop_black > 1 |
+      prop_am_in_al_na_alone > 1 |
+      prop_asian > 1 |
+      prop_na_ha_pa_is_alone > 1 |
+      prop_two_or_more > 1
+  ) %>%
+  count()
+
+# I want to also check which specific proportions were affected:
+
+census_clean %>%
+  summarise(
+    prop_white_over1 = sum(prop_white > 1, na.rm = TRUE),
+    prop_black_over1 = sum(prop_black > 1, na.rm = TRUE),
+    prop_aian_over1 = sum(prop_am_in_al_na_alone > 1, na.rm = TRUE),
+    prop_asian_over1 = sum(prop_asian > 1, na.rm = TRUE),
+    prop_nhpi_over1 = sum(prop_na_ha_pa_is_alone > 1, na.rm = TRUE),
+    prop_two_or_more_over1 = sum(prop_two_or_more > 1, na.rm = TRUE)
+  )
+```
+We see that only the `white_only` racial group got also 72 values that are inflated due to the Median imputation on low population counties. We are going to set these values as `NA` as well so we don't bring more bias into the dataset. 
+
+```{r}
+# Setting na to all the other proportions in those rows since we cannot trust those values either. -J
+census_clean <- census_clean |>
+  mutate(
+    white_alone = if_else(prop_white > 1, NA_real_, white_alone),
+    prop_white = if_else(prop_white > 1, NA_real_, prop_white),
+    prop_black = if_else(is.na(prop_white), NA_real_, prop_black),
+    prop_am_in_al_na_alone = if_else(
+      is.na(prop_white),
+      NA_real_,
+      prop_am_in_al_na_alone
+    ),
+    prop_asian = if_else(is.na(prop_white), NA_real_, prop_asian),
+    prop_na_ha_pa_is_alone = if_else(
+      is.na(prop_white),
+      NA_real_,
+      prop_na_ha_pa_is_alone
+    ),
+    prop_two_or_more = if_else(is.na(prop_white), NA_real_, prop_two_or_more)
+  )
+```
+
+We are also seeing that some of the values for Native Hawaiian Pacific Islander are showing irregular values, but we want to make sure we are not confusing scientific notations with proportions greater than 1. 
+
+```{r}
+census_clean %>%
+  filter(prop_na_ha_pa_is_alone > 1) %>%
+  count()
+```
+It looks that those values are scientific notations due to the numbers being extremely small so we don't have to make any changes to it. Right now we feel our dataset is complete and ready for plotting and understanding the patterns we have seen throughout the EDA. Just to confirm, we will run a last `glimpse()` to make sure we are not missing anyting else.
+
+```{r}
+# Final glimpse just to make sure we are all good -J
+glimpse(census_clean)
+```
+
+
+# Plots
+
+## Population Change by Region
+
+In order to use ggplot to plot the lines of total population a new dataframe need to be made where they are aggregated.  This new dataframe was built with the `dplyr` library the same as others but used the `summarise()` function instead of the mutate that was utilized earlier.  `summarise()` allows for the grouped dataframe to condense all rows in a group into a single observation based on the observed variable to be summed.  After aggregation, the total population lines are colored according to their regions.
+```{r}
+
+#need to aggregate populations by year and region separately  before plotting.
+region_pop <- census_clean %>%
+  group_by(survey_year, region) %>%
+  summarise(total_population = sum(total_population)) %>%   #mutate changes observations and summarize condenses
+  ungroup()
+region_pop
+
+#region plot with aggregated data
+region_plot <- ggplot(
+  data = region_pop, 
+  aes(x = survey_year, y = total_population, colour = region)
+  )+
+  geom_line()+
+  geom_point()+  #possible to add multiple plots
+  scale_y_continuous(labels = label_number(scale = 1e-6, suffix = "M"))+
+  labs(
+    title = "Line Chart with Points of Total Population by Region",
+    x = "Year",
+    y = "Total Population",
+    caption = "Source: ACS DP05 1-Year Estimates"
+  ) +
+  theme_minimal()+
+  theme(
+    plot.title = element_text(face = "bold", size = 13),
+    plot.caption = element_text(size = 8, color = "gray50"),
+    legend.position = "bottom",
+    panel.grid = element_blank()
+  )
+  
+region_plot
+
+```
+
+Though the chart was readable and showed that all regions had clearly increased in population (except for Puerto Rico), the degree to which was hard to read due to the large differences in total population by region creating a very wide scale.  The solution was to take the aggregated data used and create a new variable of percentage change by year. with `mutate`.  This new filed is calculated with the `lag()` function that takes the last (t-1) value so that we can easily calculate year by year change as a percentage
+```{r}
+#improving graph readability by plotting change instead of total 
+region_pop <- region_pop %>%
+  arrange(region, survey_year) %>%
+  group_by(region) %>%
+  mutate(pct_change = (total_population - lag(total_population)) / lag(total_population)) %>%    #use of `lag()` to get last population
+  ungroup()
+
+#plotting
+region_plot <- ggplot(
+  data = region_pop, 
+  aes(x = survey_year, y = pct_change, colour = region)
+  )+
+  geom_line()+
+  geom_point()+  #multiple plots layered
+  labs(
+    title = "Line Chart with Points of Total Population by Region",
+    x = "Year",
+    y = "Percent Population Change",
+    caption = "Source: ACS DP05 1-Year Estimates"
+  )+
+  theme_minimal()+
+  theme(
+    plot.title = element_text(face = "bold", size = 13),
+    plot.caption = element_text(size = 8, color = "gray50"),
+    legend.position = "bottom",
+    panel.grid = element_blank()
+  )
+  
+region_plot
+```
+We can see that all regions populations fell between 2021 and 2022 with Puerto Rico seeing the steepest decline.  Then all regions saw enough increase from 2023 to 2024 for the overall percentage change over the time period seen to be positive (with the exception of Puerto Rico).
+
+We wanted to add an additional chart to identify which U.S. counties and Census regions have experienced the largest increases or decreases in total population between 2019 and 2024, and we want to know if those shifts follow consistent geographic patterns. 
+
+The following chart uses a stacked proportional bar chart where each bar represents one Census region and the segments show the share of counties falling into each population change tier: High Growth (>10%), Moderate Growth (2-10%), Stable (-2%-10%), Decline (<-2%), and Unknown for counties that did not appear in both survey years and therefore could not have a percentage change computed. Proportions rather than raw counts are used on the x-axis to ensure fair comparison across regions with different numbers of counties. 
+
+```{r}
+# Preparing the data
+pop_change_plot <- census_clean %>%
+  filter(survey_year == 2024) %>%
+  mutate(
+    pop_change_tier = if_else(
+      is.na(pop_change_tier),
+      "Unknown",
+      pop_change_tier
+    ),
+    pop_change_tier = factor(
+      pop_change_tier,
+      levels = c(
+        "High Growth",
+        "Moderate Growth",
+        "Stable",
+        "Decline",
+        "Unknown"
+      )
+    )
+  ) %>%
+  group_by(region, pop_change_tier) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(region) %>%
+  mutate(prop = n / sum(n))
+
+# Plot
+ggplot(
+  pop_change_plot,
+  aes(x = region, y = prop, fill = pop_change_tier)
+) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(
+    values = c(
+      "High Growth" = "#2a9d8f",
+      "Moderate Growth" = "#8ab17d",
+      "Stable" = "#e9c46a",
+      "Decline" = "#e76f51",
+      "Unknown" = "#adb5bd"
+    )
+  ) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(
+    title = "Population Change Tier Distribution by Census Region (2019–2024)",
+    subtitle = "Share of counties in each growth tier per region",
+    x = "Census Region",
+    y = "Share of Counties",
+    fill = "Population Change Tier",
+    caption = "Source: ACS DP05 1-Year Estimates | Unknown = counties not present in both 2019 and 2024"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 13),
+    plot.subtitle = element_text(size = 10, color = "gray40"),
+    plot.caption = element_text(size = 8, color = "gray50"),
+    legend.position = "bottom",
+    panel.grid = element_blank()
+  )
+```
+The stacked proportional bar chat reveals clear geographic patterns in county-level population change between 2019 and 2024. The South stands out as the fastest-growing region, with the largest share of High Growth counties among all regions, driven largely by continued migration into states like Texas, Florida, Georgia, and North Carolina. The Northeast follows with a strong Moderate Growth presence, suggesting steady but less explosive growth compared to the South. 
+
+In contrast, the Midwest and West show the most concerning patterns, both regions have the highest combined share of Stable and Declined counties, consistent with long-standing trends of population out-migration from rural Midwest communities and slower growth in older West metros. The Northeast also shows a notable share of Unknown counties, reflecting the ACS 1-year survey's population threshold of 65,000 which excludes many smaller counties from certain years. 
+
+Puerto Rico, represented as Territory, is almost entirely composed of Moderate Growth counties, but has a large proportion of Decline patterns which align with the island's well-documented population loss driven by economic challenges and out-migration to the mainland. 
+
+
+## Housing to Population Ratio Distribution
+
+H2P ratio distribution was simple to plot using `ggplot`s box plot function and the previously calculated ratio
+```{r}
+
+#distribution changes over years
+h2p_year <- ggplot(census_clean, 
+       aes(y = housing_to_pop)) +
+  geom_boxplot()+
+  labs(
+    caption = "Source: ACS DP05 1-Year Estimates"
+  )+
+  theme_minimal()+
+  theme(
+    panel.grid = element_blank()
+  )
+h2p_year
+
+```
+We can see that the median value is around .43 and the IQR is just over .4 to just under .5, meaning that most counties have 2 or less people per house built.  It is also important to note that each counties can appear a total of four times as all years are included in this plot  In the data we can see that most outliers are counties that have exceedingly high ratios than low.
+
+In order to see more detailed information the same plot was made but by region using the color option of `ggplot`
+```{r}
+#distribution ranges by region
+h2p_year_reg <- ggplot(census_clean, 
+       aes(y = housing_to_pop, 
+           color = region)) +
+  geom_boxplot()+
+    labs(
+    title = "Housing to Population Ratio",
+    subtitle = "Distributions by Region",
+    y = "Housing to Population Ratio",
+    caption = "Source: ACS DP05 1-Year Estimates")+
+  theme_minimal()+
+  theme(
+    plot.title = element_text(face = "bold", size = 13),
+    plot.caption = element_text(size = 8, color = "gray50"),
+    legend.position = "bottom",
+    panel.grid = element_blank()
+  )
+h2p_year_reg
+```
+We can see a great deal of variation between regions and especially the sizes of the second quantiles.  Most importantly, we can see that all of the greatest outliers belong solely to the Northeast region. this indicates that we might gain some additional insight if a similar plot was made for other variables like diversity index or average household income, were it available
+
+## Housing to Population Ratio Over Time and in Relation to Total Population
+
+In order to find the change of housing ratio over the period of census years evaluated, the median stratified by `survey_year` and `region` was taken.
+```{r}
+#finding median h2p by year by region
+h2p_year_reg <- census_clean %>%
+  group_by(survey_year, region) %>%
+  summarise(housing_to_pop = median(housing_to_pop)) %>%
+  ungroup()
+
+#plotting
+h2p_year_plot <- ggplot(
+  data = h2p_year_reg, 
+  aes(x = survey_year, y = housing_to_pop, colour = region)
+  )+
+  geom_line()+
+  geom_point()+  #multiple plots layered
+  labs(
+    title = "Housing to Population Ratio Over Time",
+    x = "Year",
+    y = "Housing to Population Ratio",
+    caption = "Source: ACS DP05 1-Year Estimates"
+  )+
+  theme_minimal()+
+  theme(
+    plot.title = element_text(face = "bold", size = 13),
+    plot.caption = element_text(size = 8, color = "gray50"),
+    legend.position = "bottom",
+    panel.grid = element_blank()
+  )
+  
+h2p_year_plot
+```
+This plot as separated into regions so that it could be compared against the earlier chart of `Total Population` by `region`. We can see that Puerto Rico's steep population decline from 2021 to 2022 is seen inversely as the steepest single year increase in `housing to population ratio`.  Additionally the steep decline in `housing to population ratio` in the preceding year is indicative of factors encouraging the emigration of its younger population to be discussed later.  From 2022 onward, the steady growth seen in `total population` doesn't seem to affect `housing to population ratio` nearly as heavily.
+
+For a county level analysis of `total population` versus `housing to population ratio` the variable needed to be aggregated across years for each county.  Due to the great variation in population between counties, a logarithmic scale was used for the x-axis.
+```{r}
+#aggregating all countries total population and h2ps across years by county
+h2p_pop <- census_clean %>%
+  group_by(county_name, ) %>%
+  summarise(housing_to_pop = mean(housing_to_pop), avg_total_pop = mean(total_population)) %>%
+  ungroup()
+
+#plotting
+h2p_pop_plot <- ggplot(
+  data = h2p_pop, 
+  aes(y = housing_to_pop, x = avg_total_pop)
+  )+
+  geom_point()+  #multiple plots layered
+  geom_smooth()+
+  scale_x_log10(labels = label_number(scale = 1e-6, suffix = "M"))+  #changes x-scale from scientific to Millions on log scale
+  labs(
+    title = "County Housing to Population Ratios by Total Populations",
+    x = "Total Population",
+    y = "Housing to Population Ratio",
+    caption = "Source: ACS DP05 1-Year Estimates"
+  )+
+  theme_minimal()+
+  theme(
+    plot.title = element_text(face = "bold", size = 13),
+    plot.caption = element_text(size = 8, color = "gray50"),
+    legend.position = "bottom",
+    panel.grid = element_blank()
+  )
+
+h2p_pop_plot
+```
+We can see that there is very little correlation between `housing to population ratio` and `total population` for counties. This suggests that the dominant factor in determining the amount of houses available for the resident of county is not how many residents are there and alternate relationships/explanations should be explored.  
+
+## Age Structure Trends Over Time
+
+We want to track how the average median age across U.S. counties has shifted between 2019 and 2024, grouped by Census region. By plotting median age over time rather than a single snapshot, we can identify which regions are aging most rapidly and whether the trend is consistent or accelerating. A steadily rising line across all regions would suggest a broad nation aging pattern, while diverging lines would point to regional differences worth investigating for policy planning purposes such as healthcare capacity and social security demand. 
+
+```{r}
+#Preparing the data
+age_structure_plot <- census_clean %>%
+  group_by(region, survey_year) %>%
+  summarise(
+    avg_median_age = mean(median_age, na.rm = TRUE),
+    avg_senior_share = mean(senior_pop_share, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+#Plot
+ggplot(
+  age_structure_plot,
+  aes(x = survey_year, y = avg_median_age, colour = region)
+)+
+  geom_line()+
+    geom_point()+
+    labs(
+      title = "Average Median Age by Census Region (2019-2024)",
+      subtitle = "Tracking age structure shifts across U.S. counties over time",
+      x = "Survey Year",
+      y = "Average Median Age",
+      colour = "Census Region",
+      caption = "Source: ACS DP05 1-Year Estimates"
+    )+
+    theme_minimal()+
+    theme(
+      plot.title = element_text(face = "bold", size = 13),
+      plot.subtitle = element_text(size = 10, color = "gray40"),
+      plot.caption = element_text(size = 8, color = "gray50"),
+      legend.position = "bottom",
+      panel.grid = element_blank()
+    )
+```
+We see that Puerto Rico is aging the fastest and is the oldest by far. Starting at around 43 in 2019 and climbing to nearly 45 in 2024, it shows the most dramatic aging trend of any region. This aligns with Puerto Rico's documented population loss, younger residents are leaving for the mainland, leaving behhind older populations. 
+
+The Northeast is the oldest mainland region sitting consistently around 42, but its trend line is relatively flat, suggesting its age structure is stable rather than rapidly shifting. 
+
+The South and Midwest are aging gradually both hovering around 39-40 and showing a slow but steady upward climb across all five years. Given that the South had the highest population growth we saw in the previous chart, this is worth noting: even fast-growing regions are not immune to the broader national aging trend. 
+
+The West is the youngest region starting just below 39 in 2019 but also showing a gradual upward trend by 2024. The big takeaway is that every region shows an upward trend, no region got younger between 2019 and 2024. This confirms a broad national aging pattern that has policy implications for healthcare capacity, Midcare demand, and worforce planning across all regions. 
+
+## Diversity Index Patterns
+
+We wanted to examine how racial diversity is distributed across Census regions by showing the proportion of county-year observations falling into each diversity tier: Low, Moderate, and High. Rather than showing a single diversity score, the stacked proportional format allows a fair comparisson across regions regardless of how many counties each contains. Regions with a dominant High tier share suggest a broader racial diversity across their counties, while regions skewed toward Low suggest more racially homogeneous county compositions, which carries implications for equitable policy design and resource allocation. 
+
+```{r}
+# Preparing the data -J
+diversity_plot <- census_clean %>%
+  filter(!is.na(diversity_tier)) %>%
+  mutate(
+    diversity_tier = factor(
+      diversity_tier,
+      levels = c("Low", "Moderate", "High")
+    )
+  ) %>%
+  group_by(region, diversity_tier) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(region) %>%
+  mutate(prop = n / sum(n))
+
+# Plot 
+ggplot(
+  diversity_plot,
+  aes(x = region, y = prop, fill = diversity_tier)
+)+
+  geom_bar(stat = "identity")+
+  scale_fill_manual(
+    values = c(
+      "Low" = "#e9c46a",
+      "Moderate" = "#8ab17d",
+      "High" = "#2a9d8f"
+    )
+  )+
+  scale_y_continuous(labels = scales::percent) +
+  labs(
+    title = "Racial Diversity Index Tier Distribution by Census Region",
+    subtitle = "Share of county-year observations in each diversity tier per region",
+    x = "Census Regions",
+    y = "Share of Counties",
+    fill = "Diversity Tier",
+    caption = "Source: ACS DP05 1-Year Estimates"
+  )+
+  theme_minimal()+
+  theme(
+    plot.title = element_text(face = "bold", size = 13),
+    plot.subtitle = element_text(size = 10, color = "gray40"),
+    plot.caption = element_text(size = 8, color = "gray50"),
+    legend.position = "bottom",
+    panel.grid = element_blank()
+  )
+```
+The chart reveals a striking regional difference in racial diversity at the county level. Puerto Rico stands out as the most racially diverse region by far, with nearly 90% of its county-year observations falling into the High diversity tier, reflecting its predominantly non-white population composition.The Northeast follows as the second most diverse mainland region, with roughly 25% High and about 25% Moderate diversity counties, though it also carries a notably large Low tier share suggesting considerable variation within the region itself. 
+
+The Midwest is the least diverse region overall, with nearly 90% of its counties falling into Low and Moderate tiers combined, consistent with its predominantly white rural county composition. The South and West sit in the middle, both showing more balanced mix across all thre tiers, reflecting the presence of both highly diverse urban counties and more homogeneous rural ones. 
+
+## Exploratory Visualization - NAs
+
+We identified three possible limitations within the dataset in terms missing data: 
+* **Census Suppressed Counties**: These are counties that were surveyed but had their racial data suppressed because the sample size was too small for that specific racial group.
+* **NAs Added Due to Imputations Inflating Results**: These are counties where the imputed `white_alone` median exceeded the total population, making their diversity calculations impossible. These tend to be smaller counties in predominantly white regions. 
+* **126 Counties Missing from `pop_change_tier`**: These counties did not appear in both 2019 and 2024, meaning they fell below the ACS 65,000 population threshold in at least one of those years. 
+
+We want to Isolate these limitations and understand better how these affect the data or what conclusions we could draw from it. Before we create a visualization, we need to create a new data frame to check counties that were not surveyed both years, then check for imputation errors, check for suppressed data and then categorize everything else as `No Limitation`.
+
+```{r}
+limitation_plot <- census_clean %>%
+  filter(survey_year == 2024, region != "Territory") %>%
+  mutate(
+    limitation_type = case_when(
+      is.na(pop_change_tier) ~ "Not Surveyed Both Years",
+      is.na(prop_white) ~ "Imputation Error",
+      is.na(white_alone) ~ "Suppressed by Census",
+      TRUE ~ "No Limitation"
+    ),
+    limitation_type = factor(limitation_type, levels = c(
+      "No Limitation",
+      "Suppressed by Census",
+      "Imputation Error",
+      "Not Surveyed Both Years"
+    ))
+  )
+
+limitation_plot %>%
+  count(limitation_type)
+
+```
+
+We only see 3 categories here, which means that in 2024 specifically there are no "Suppressed by Census" counties, and the Imputation error only affected 2 counties. The 72 imputation erros are most likely spread across the other years so we will have to find out where are those errors.
+
+```{r}
+census_clean %>%
+  filter(is.na(prop_white)) %>%
+  count(survey_year)
+```
+
+So, according to this, most of the imputation errors happened in 2019. We wanted to just populate the data for 2024 but given that the errors were imputed across the years, we will use all of the years to gather a full picture of all limitations between 2019 to 2024. We will flag a county if they had an imputation error in either year and then choose the worst case by county. 
+
+```{r}
+limitation_plot <- census_clean |>
+  filter(region != "Territory") |>
+  group_by(geo_id, county_name, state_name, region) |>
+  summarise(
+    total_population  = mean(total_population, na.rm = TRUE),
+    senior_pop_share  = mean(senior_pop_share, na.rm = TRUE),
+    has_no_pop_change = any(is.na(pop_change_tier)),
+    has_imputation    = any(is.na(prop_white)),
+    has_suppression   = any(is.na(white_alone) & !is.na(prop_white)),
+    .groups = "drop"
+  ) |>
+  mutate(
+    limitation_type = case_when(
+      has_imputation    ~ "Imputation Error",
+      has_no_pop_change ~ "Not Surveyed Both Years",
+      has_suppression   ~ "Suppressed by Census",
+      TRUE              ~ "No Limitation"
+    ),
+    limitation_type = factor(limitation_type, levels = c(
+      "No Limitation",
+      "Suppressed by Census",
+      "Not Surveyed Both Years",
+      "Imputation Error"
+    ))
+  )
+
+limitation_plot %>%
+  count(limitation_type)
+
+# We see things that make more sense now so we can plot
+
+ggplot(limitation_plot, aes(x = total_population, y = senior_pop_share, color = limitation_type))+
+  geom_point(alpha = 0.6, size = 2)+
+  scale_color_manual(values = c(
+    "No Limitation" = "#adb5bd",
+    "Suppression by Census" = "#e9c46a",
+    "Not Surveyed Both Years" = "#e76f51",
+    "Imputation Error" = "#2a9d8f"
+  ))+
+  scale_x_log10(labels = scales::comma)+
+  scale_y_continuous(labels = scales::percent_format(scale = 1))+
+  labs(
+    title = "Data Limitation by County Population Size and Senior Share",
+    subtitle = "Counties flagged for imputation errors or missing survey years tend to be smaller",
+    x = "Total Population (Log Scale)",
+    y = "Average Senior Population Share (%)",
+    color = "Limitation Type",
+    caption = "Source: ACS DP05 1-Year Estimates 2019-2024 | One point per county, averaged across  available years"
+  )+
+  theme_minimal()+
+  theme(
+    plot.title = element_text(face = "bold", size = 13),
+    plot.subtitle = element_text(size = 10, color = "gray40"),
+    plot.caption = element_text(size = 8, color = "gray50"),
+    legend.position = "bottom",
+    panel.grid = element_blank()
+  )
+```
+```{r}
+# Create a color palette/color theme for Warren's plots
+region_colors <- c(
+  "Midwest" = "#e76f51",
+  "Northeast" = "#a3a500",
+  "South" = "#00bf7d",
+  "Territory" = "#00b0f6",
+  "West" = "#e76bf3"
+)
+
+warren_theme <- theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 13),
+    plot.subtitle = element_text(size = 10, color = "gray40"),
+    plot.caption = element_text(size = 8, color = "gray50"),
+    legend.position = "bottom",
+    panel.grid = element_blank()
+  )
+```
+
+## Racial Ethnic Compositions
+
+```{r}
+# Calculate regional racial/ethnic composition share over time
+racial_comp_plot <- census_clean %>%
+  group_by(region, survey_year) %>%
+  summarise(
+    total_population = sum(total_population, na.rm = TRUE),
+    white_alone = sum(white_alone, na.rm = TRUE),
+    black_alone = sum(black_alone, na.rm = TRUE),
+    asian_alone = sum(asian_alone, na.rm = TRUE),
+    hispanic_latino = sum(hispanic_latino, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    white_share = (white_alone / total_population) * 100,
+    black_share = (black_alone / total_population) * 100,
+    asian_share = (asian_alone / total_population) * 100,
+    hispanic_share = (hispanic_latino / total_population) * 100
+  ) %>%
+  select(region, survey_year, white_share, black_share, asian_share, hispanic_share) %>%
+  pivot_longer(
+    cols = c(white_share, black_share, asian_share, hispanic_share),
+    names_to = "group",
+    values_to = "share"
+  ) %>%
+  mutate(
+    group = recode(
+      group,
+      "white_share" = "White Alone",
+      "black_share" = "Black Alone",
+      "asian_share" = "Asian Alone",
+      "hispanic_share" = "Hispanic or Latino"
+    )
+  )
+```
+
+```{r}
+# Visualize racial and ethnic composition by regions
+ggplot(racial_comp_plot, aes(x = survey_year, y = share, color = region)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  facet_wrap(~ group, ncol = 2) +
+  scale_color_manual(values = region_colors) +
+  scale_x_continuous(breaks = c(2019, 2021, 2022, 2023, 2024)) +
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+  labs(
+    title = "Racial and Ethnic Composition Changes by U.S. Region (2019–2024)",
+    subtitle = "Regional population shares for White alone, Black alone, Asian alone, and Hispanic or Latino populations",
+    x = "Survey Year",
+    y = "Population Share",
+    color = "Census Region",
+    caption = "Source: ACS DP05 1-Year Estimates"
+  ) +
+  warren_theme
+```
+This plot illustrates each regions unique racial and ethnic composition between 2019 and 2024. Generally, change was gradual, not sudden and dramatic. Puerto Rico leads all regions in Hispanic or Latino population and has a much smaller White alone population share as compared to the mainland regions. The South region has the largest Black only share as compared to all regions, while the West region has the largest Latino or Hispanic population share outside of Puerto Rico. While the shares of racial and ethnic populations varied across regions, the broad theme illustrated by this chart is that changes occured gradually and gently over time.
+
+## Senior Population Share
+
+```{r}
+# Calculate weighted senior population share by region over time
+senior_plot <- census_clean %>%
+  group_by(region, survey_year) %>%
+  summarise(
+    total_population = sum(total_population, na.rm = TRUE),
+    population_65_and_over = sum(population_65_and_over, na.rm = TRUE),
+    senior_pop_share = (population_65_and_over / total_population) * 100,
+    .groups = "drop"
+  )
+```
+
+```{r}
+# Visualize senior population by region 
+ggplot(senior_plot, aes(x = survey_year, y = senior_pop_share, color = region)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  scale_color_manual(values = region_colors) +
+  scale_x_continuous(breaks = c(2019, 2021, 2022, 2023, 2024)) +
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+  labs(
+    title = "Senior Population Share by Census Region (2019–2024)",
+    subtitle = "Weighted share of the regional population age 65 and over",
+    x = "Survey Year",
+    y = "Senior Population Share",
+    color = "Census Region",
+    caption = "Source: ACS DP05 1-Year Estimates"
+  ) +
+  warren_theme
+```
+This plot shows that all regions studied aged over time between 2019 and 2024. Puerto Rico has the largest share of senior population by far relative to all other regions. The Northeast region is more aligned with the other mainland U.S. regions, but still leads all regions (except Puerto Rico) in aging popultion. While aging population is not exclusive to any one region, this trend appears especially pronounced in Puerto Rico and, to a lesser extent, in the Northeast region. 
+
+## Working Age Population
+
+```{r}
+# Calculate weighted working-age population share by region over time
+working_age_plot <- census_clean %>%
+  group_by(region, survey_year) %>%
+  summarise(
+    total_population = sum(total_population, na.rm = TRUE),
+    working_age_population = sum(population_18_and_over - population_65_and_over, na.rm = TRUE),
+    working_age_pop_share = (working_age_population / total_population) * 100,
+    .groups = "drop"
+  )
+```
+
+```{r}
+# Visualize working age population share by region over time
+ggplot(working_age_plot, aes(x = survey_year, y = working_age_pop_share, color = region)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  scale_color_manual(values = region_colors) +
+  scale_x_continuous(breaks = c(2019, 2021, 2022, 2023, 2024)) +
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+  labs(
+    title = "Working-Age Population Share by Census Region (2019–2024)",
+    subtitle = "Weighted share of the regional population between ages 18 and 64",
+    x = "Survey Year",
+    y = "Working-Age Population Share",
+    color = "Census Region",
+    caption = "Source: ACS DP05 1-Year Estimates"
+  ) +
+  warren_theme
+```
+This visualization shows that working age population decreased across every region during the years included in the study. The West region started with the highest share of working age population and that trend maintained throughout. Puerto Rico started with the lowest share of working age population, remained the lowest throughout, and trneded downward over time. This plot is vital because it shows that the population most likely to participate in the workforce is decreasing across all regions, which supports aging trends discovered in this analysis.
+
+## Youth Population Share
+
+```{r}
+# Calculate weighted youth population share by region over time
+youth_plot <- census_clean %>%
+  group_by(region, survey_year) %>%
+  summarise(
+    total_population = sum(total_population, na.rm = TRUE),
+    population_under_18 = sum(population_under_18, na.rm = TRUE),
+    youth_pop_share = (population_under_18 / total_population) * 100,
+    .groups = "drop"
+  )
+```
+
+```{r}
+# Visualize youth population share by region over time
+ggplot(youth_plot, aes(x = survey_year, y = youth_pop_share, color = region)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  scale_color_manual(values = region_colors) +
+  scale_x_continuous(breaks = c(2019, 2021, 2022, 2023, 2024)) +
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+  labs(
+    title = "Youth Population Share by Census Region (2019–2024)",
+    subtitle = "Weighted share of the regional population under age 18",
+    x = "Survey Year",
+    y = "Youth Population Share",
+    color = "Census Region",
+    caption = "Source: ACS DP05 1-Year Estimates"
+  ) +
+  warren_theme
+```
+This chart clearly illustrates a major finding in this study: the share of young people declined in every region between 2019 and 2024. While the South region remained the most youthful relative to all regions, Puerto Rico had the lowest youth population share among all regions and it experienced the steepest decline during this period. All regions studied are gaining older residents and comprising a smaller share of youth population over time.
+
+## Sex Ratio
+
+```{r}
+# Build sex_ratio_plot with outlier classification using 1.5 x IQR rule
+sex_ratio_plot <- census_clean %>%
+  filter(!is.na(sex_ratio), !is.na(region)) %>%
+  group_by(survey_year) %>%
+  mutate(
+    q1 = quantile(sex_ratio, 0.25, na.rm = TRUE),
+    q3 = quantile(sex_ratio, 0.75, na.rm = TRUE),
+    iqr = q3 - q1,
+    lower_bound = q1 - 1.5 * iqr,
+    upper_bound = q3 + 1.5 * iqr,
+    outlier_status = if_else(
+      sex_ratio < lower_bound | sex_ratio > upper_bound,
+      "Outlier",
+      "Typical"
+    )
+  ) %>%
+  ungroup()
+
+# Create labels for the most extreme outliers in each year
+sex_ratio_labels <- sex_ratio_plot %>%
+  filter(outlier_status == "Outlier") %>%
+  mutate(distance_from_100 = abs(sex_ratio - 100)) %>%
+  group_by(survey_year) %>%
+  arrange(desc(distance_from_100)) %>%
+  slice_head(n = 5) %>%
+  ungroup()
+```
+
+```{r}
+# Generate visualization for sex ratio by region over time
+ggplot(sex_ratio_plot, aes(x = total_population, y = sex_ratio, color = region)) +
+  geom_hline(yintercept = 100, linetype = "dashed", color = "gray50") +
+  geom_hline(
+    data = sex_ratio_plot %>% distinct(survey_year, lower_bound, upper_bound),
+    aes(yintercept = lower_bound),
+    linetype = "dotted",
+    color = "gray70",
+    inherit.aes = FALSE
+  ) +
+  geom_hline(
+    data = sex_ratio_plot %>% distinct(survey_year, lower_bound, upper_bound),
+    aes(yintercept = upper_bound),
+    linetype = "dotted",
+    color = "gray70",
+    inherit.aes = FALSE
+  ) +
+  geom_point(aes(size = outlier_status, alpha = outlier_status)) +
+  geom_text(
+    data = sex_ratio_labels,
+    aes(label = county_name),
+    size = 2.5,
+    vjust = -0.6,
+    check_overlap = TRUE,
+    show.legend = FALSE
+  ) +
+  facet_wrap(~ survey_year, ncol = 3) +
+  scale_color_manual(values = region_colors) +
+  scale_x_log10(labels = scales::comma) +
+  scale_size_manual(values = c("Typical" = 1.6, "Outlier" = 3.0)) +
+  scale_alpha_manual(values = c("Typical" = 0.45, "Outlier" = 0.95)) +
+  labs(
+    title = "County Sex Ratio Outliers by Population Size and Census Region",
+    subtitle = "Faceted by survey year; outliers are defined within each year using the 1.5 × IQR rule",
+    x = "Total Population (Log Scale)",
+    y = "Sex Ratio (Males per 100 Females)",
+    color = "Census Region",
+    size = "",
+    caption = "Source: ACS DP05 1-Year Estimates"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 13),
+    plot.subtitle = element_text(size = 10, color = "gray40"),
+    plot.caption = element_text(size = 8, color = "gray50"),
+    legend.position = "bottom",
+    panel.grid = element_blank()
+  )
+```
+While this chart is not the most readable, it still provides useful information. It shows that the largest sex ratio outliers are concentrated in smaller counties, while sex ratios in large counties cluster closest to a balanced state. This pattern appears to be consistent across all years included in the study. Generally, there are just a small number of counties that have very unusual ratios that are high male or high female. The extremes in sex ratio appear to have more to do with the size of the county than major differences between regions.  
+```{r}
+# Check sex ratio summary table
+sex_ratio_summary <- sex_ratio_plot %>%
+  group_by(survey_year, region) %>%
+  summarise(
+    avg_sex_ratio = mean(sex_ratio, na.rm = TRUE),
+    outlier_count = sum(outlier_status == "Outlier", na.rm = TRUE),
+    .groups = "drop"
+  )
+
+sex_ratio_summary
+```
+
+```{r}
+# Create visualization for average county sex ratio by region
+sex_ratio_region <- census_clean %>%
+  filter(
+    !is.na(sex_ratio),
+    !is.na(region),
+    region != "Territory"
+  ) %>%
+  group_by(region, survey_year) %>%
+  summarise(
+    avg_sex_ratio = mean(sex_ratio, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+ggplot(sex_ratio_region, aes(x = survey_year, y = avg_sex_ratio, color = region)) +
+  geom_hline(yintercept = 100, linetype = "dashed", color = "gray50") +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  scale_color_manual(values = region_colors) +
+  labs(
+    title = "Average County Sex Ratio by Census Region (2019–2024)",
+    subtitle = "Average number of males per 100 females across counties in each region",
+    x = "Survey Year",
+    y = "Average Sex Ratio",
+    color = "Census Region",
+    caption = "Source: ACS DP05 1-Year Estimates"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 13),
+    plot.subtitle = element_text(size = 10, color = "gray40"),
+    plot.caption = element_text(size = 8, color = "gray50"),
+    legend.position = "bottom",
+    panel.grid = element_blank()
+  )
+```
+This chart shows that sex ratios by county were relatively stable during the time covered by the study and remained balanced in al regions. The West region was the only region that remained consistently above 100. This suggests that the West region averaged more males in the population than females. The South region remained with the lowest sex ration relative to all regions throughout the period studied. The major story from this data is that this measure was fiarly stable across all regions, however material gaps exist between regions although major shifts over time did not appear to occur.
+
+
